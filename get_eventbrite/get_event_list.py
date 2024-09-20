@@ -35,7 +35,9 @@ def get_event_list(url):
                     event_url = title_element.get_attribute("href")
                     event_title = title_element.text
                     event["href"] = event_url
+                    print(event_url)
                     event["title"] = event_title
+                    print(event_title)
                     event_list.append(event)
             except NoSuchElementException:
                 is_search_result = False
