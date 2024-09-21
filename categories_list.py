@@ -6,5 +6,5 @@ web3_categories_list = [
     "Dapp", "DeFi", "Decentral", "Dex", "Swap", "DAO", "staking", "liquidity", "RWA", "Depin", "Gaming",
     "Hackathon", "metaverse", "Wallet", "meme", "Consensus", "Tokenomics", "Vitalik", "cross chain", "KYC", "digital asset",
     "P2E", "IDO", "ICO", "IEO", "IoT", "ITO", "governance", "ERC", "TRC", "NEP", "SPL", "FFT", "EOS", "BEP",
-    "GenAI", "AI",
+    "GenAI", "AI"
 ]
