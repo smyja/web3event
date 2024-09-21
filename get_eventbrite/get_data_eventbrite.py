@@ -8,6 +8,7 @@ def get_from_eventbrite():
     eventbrite_url = "https://www.eventbrite.com"
     event_list = []
     for city in web3event_cities:
+        print(city)
         for tag in web3event_tags:
             url = eventbrite_url + "/d/" + city + "/" + tag
             event_list.extend(get_event_list(url))
