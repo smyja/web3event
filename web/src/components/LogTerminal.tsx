@@ -1,148 +1,224 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Box, Text, ScrollArea, Title, useMantineTheme, Button, TextInput, Select, Group } from '@mantine/core';
-import { Terminal } from 'tabler-icons-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Tabs, rem, Button, Select, MultiSelect, Text, Box } from '@mantine/core';
+import { IconMessageCircle, IconSettings } from '@tabler/icons-react';
 
-interface Log {
-  timestamp: string;
-  level: string;
-  message: string;
-}
-
-export const LogTerminal: React.FC = () => {
-  const [logs, setLogs] = useState<Log[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [city, setCity] = useState('');
-  const [tags, setTags] = useState('');
-  const [taskId, setTaskId] = useState('');
-  const [isScrapingStarted, setIsScrapingStarted] = useState(false);
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const theme = useMantineTheme();
-  const wsRef = useRef<WebSocket | null>(null);
-
-  const connectWebSocket = () => {
-    const ws = new WebSocket('ws://localhost:8000/ws');
-
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-      setIsConnected(true);
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.log) {
-        setLogs(prevLogs => [...prevLogs, data.log]);
-      }
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      setIsConnected(false);
-      setTimeout(connectWebSocket, 5000); // Try to reconnect after 5 seconds
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      ws.close();
-    };
-
-    wsRef.current = ws;
-  };
+function LogTerminal() {
+  const [logs, setLogs] = useState('');
+  const [isScraping, setIsScraping] = useState(false);
+  const [city, setCity] = useState('ny--new-york');
+  const [tags, setTags] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [activeTab, setActiveTab] = useState('input');
+  const iconStyle = { width: rem(12), height: rem(12) };
+  const logsRef = useRef(null);
 
   useEffect(() => {
-    connectWebSocket();
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (scrollAreaRef.current) {
-      scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' });
+    if (logsRef.current) {
+      logsRef.current.scrollTop = logsRef.current.scrollHeight;
     }
   }, [logs]);
 
-  const handleStartScraping = async () => {
+  const startScraping = async () => {
+    console.log("Starting scraping process");
+    setIsScraping(true);
+    setLogs('Processing...\n');
+    setEvents([]);
+    setActiveTab('logs');
+
     try {
-      setIsScrapingStarted(true);
-      setLogs([]); // Clear previous logs
+      console.log(`Sending request to server for city: ${city}, tags: ${tags}`);
       const response = await fetch('http://localhost:8000/scrape', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          city,
-          tags: tags.split(',').map(tag => tag.trim()),
+          city: city,
+          tags: tags.length > 0 ? tags : null,
         }),
       });
-      const data = await response.json();
-      setTaskId(data.task_id);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      console.log("Response received, starting to read");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      let buffer = '';
+      let isJsonData = false;
+      let jsonBuffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          console.log("Reader done");
+          break;
+        }
+        
+        const chunk = decoder.decode(value, { stream: true });
+        console.log("Received chunk:", chunk);
+        buffer += chunk;
+        
+        while (buffer.length > 0) {
+          if (!isJsonData) {
+            const newlineIndex = buffer.indexOf('\n');
+            if (newlineIndex === -1) break;
+            
+            const line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            
+            console.log("Processing line:", line);
+
+            if (line.includes('BEGIN_JSON_DATA')) {
+              console.log("JSON data start detected");
+              isJsonData = true;
+              continue;
+            }
+
+            setLogs(prevLogs => prevLogs + line + '\n');
+          } else {
+            const endIndex = buffer.indexOf('END_JSON_DATA');
+            if (endIndex === -1) {
+              jsonBuffer += buffer;
+              buffer = '';
+            } else {
+              jsonBuffer += buffer.slice(0, endIndex);
+              buffer = buffer.slice(endIndex + 'END_JSON_DATA'.length);
+              isJsonData = false;
+              
+              console.log("JSON data end detected");
+              try {
+                console.log("Attempting to parse JSON, length:", jsonBuffer.length);
+                const data = JSON.parse(jsonBuffer.trim());
+                console.log("Parsed JSON data, events count:", data.events.length);
+                setEvents(data.events);
+                setLogs(prevLogs => prevLogs + 'Scraping completed. Events data received.\n');
+                setActiveTab('input');
+              } catch (error) {
+                console.error('Error parsing JSON:', error);
+                setLogs(prevLogs => prevLogs + `Error parsing JSON: ${error.message}\n`);
+              }
+              jsonBuffer = '';
+            }
+          }
+        }
+      }
     } catch (error) {
-      console.error('Error starting scraping:', error);
-      setIsScrapingStarted(false);
+      console.error('Error during scraping:', error);
+      setLogs(prevLogs => prevLogs + `Error: ${error.message}\n`);
+    } finally {
+      console.log("Scraping process finished");
+      setIsScraping(false);
     }
   };
 
-  return (
-    <Box style={{ height: '100vh', backgroundColor: theme.colors.dark[8], padding: theme.spacing.md }}>
-<Box style={{ display: 'flex', alignItems: 'center', marginBottom: theme.spacing.md }}>
-  <Terminal size={24} strokeWidth={2} color={theme.colors.blue[6]} />
-  <Title order={3} ml="sm" c={theme.colors.gray[0]}>EventBrite Scraper Logs</Title>
-  <Text ml="auto" c={isConnected ? theme.colors.green[6] : theme.colors.red[6]}>
-    {isConnected ? 'Connected' : 'Disconnected'}
-  </Text>
-</Box>
+  console.log("Current events state:", events);
 
+  return (
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <Tabs value={activeTab} onChange={setActiveTab} style={{ flexShrink: 0 }}>
+        <Tabs.List>
+          <Tabs.Tab value="input" leftSection={<IconSettings style={iconStyle} />}>
+            Scrape Input
+          </Tabs.Tab>
+          <Tabs.Tab value="logs" leftSection={<IconMessageCircle style={iconStyle} />}>
+            Logs
+          </Tabs.Tab>
+        </Tabs.List>
+      </Tabs>
       
-      <Group justify='space-between' mb="md">
-        <Select
-          data={[
-            { value: 'ny--new-york', label: 'New York' },
-            { value: 'ca--san-francisco', label: 'San Francisco' },
-            { value: 'gb--london', label: 'London' },
-          ]}
-          placeholder="Select a city"
-          label="City"
-          value={city}
-          onChange={(value) => setCity(value || '')}
-          style={{ flexGrow: 1 }}
-        />
-        <TextInput
-          placeholder="Enter tags (comma-separated)"
-          label="Tags"
-          value={tags}
-          onChange={(event) => setTags(event.currentTarget.value)}
-          style={{ flexGrow: 2 }}
-        />
-        <Button
-          onClick={handleStartScraping}
-          disabled={!city || !tags || isScrapingStarted}
-          style={{ alignSelf: 'flex-end' }}
-        >
-          Start Scraping
-        </Button>
-      </Group>
-      
-      {taskId && (
-        <Text color={theme.colors.gray[3]} mb="md">
-          Task ID: {taskId}
-        </Text>
-      )}
-      
-      <ScrollArea style={{ height: 'calc(100% - 150px)' }} ref={scrollAreaRef}>
-        {logs.map((log, index) => (
-          <Text key={index} style={{ fontFamily: 'monospace', fontSize: theme.fontSizes.sm, whiteSpace: 'pre-wrap' }}>
-            <Text span c={theme.colors.gray[5]}>{log.timestamp}</Text>
-            <Text span c={log.level === 'ERROR' ? theme.colors.red[6] : theme.colors.blue[6]}> - {log.level}</Text>
-            <Text span c={theme.colors.gray[3]}> - {log.message}</Text>
-          </Text>
-        ))}
-      </ScrollArea>
-    </Box>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {activeTab === 'logs' && (
+          <div
+            ref={logsRef}
+            style={{
+              flex: 1,
+              backgroundColor: '#222',
+              color: '#fff',
+              padding: '10px',
+              overflowY: 'auto',
+              fontFamily: 'monospace',
+              whiteSpace: 'pre-wrap',
+              wordWrap: 'break-word',
+            }}
+          >
+            {logs}
+          </div>
+        )}
+        
+        {activeTab === 'input' && (
+          <div style={{ padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', height: '100%' }}>
+            <div style={{ marginBottom: '20px' }}>
+              <Select
+                label="City"
+                placeholder="Select a city"
+                value={city}
+                onChange={setCity}
+                data={[
+                  { value: 'ny--new-york', label: 'New York' },
+                  { value: 'ca--san-francisco', label: 'San Francisco' },
+                  { value: 'gb--london', label: 'London' },
+                ]}
+                style={{ marginBottom: '10px' }}
+              />
+              <MultiSelect
+                label="Tags"
+                placeholder="Select or type tags"
+                value={tags}
+                onChange={setTags}
+                data={[
+                  'blockchain',
+                  'nft',
+                  'crypto',
+                  'token',
+                  'defi',
+                  'Ethereum',
+                  'Solana',
+                  'DAO',
+                  'gaming',
+                  'GenAI',
+                ]}
+                getCreateLabel={(query) => `+ Create ${query}`}
+                onCreate={(query) => {
+                  const item = query.trim().toLowerCase();
+                  if (item && !tags.includes(item)) {
+                    setTags((prev) => [...prev, item]);
+                  }
+                  return item;
+                }}
+                searchable
+                creatable
+                style={{ marginBottom: '10px' }}
+              />
+              <Button onClick={startScraping} disabled={isScraping} fullWidth>
+                {isScraping ? 'Scraping...' : 'Start Scraping'}
+              </Button>
+            </div>
+            
+            {events.length > 0 && (
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                <Text size="xl" w={700} mb="md">Scraped Events ({events.length})</Text>
+                {events.map((event, index) => (
+                  <Box key={index} mb="md" p="sm" style={{ border: '1px solid #ccc', borderRadius: '4px' }}>
+                    <Text w={700}>{event.title}</Text>
+                    <Text size="sm">{event.time}</Text>
+                    <Text size="sm">{event.addr.street_addr}, {event.addr.local_addr}</Text>
+                    <Text size="sm">Ticket: {event.ticket}</Text>
+                    <Text size="sm" component="a" href={event.href} target="_blank" rel="noopener noreferrer">
+                      Event Link
+                    </Text>
+                  </Box>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
-};
+}
 
 export default LogTerminal;

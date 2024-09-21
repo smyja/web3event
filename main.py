@@ -1,5 +1,6 @@
-from fastapi import FastAPI, BackgroundTasks, WebSocket
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from selenium import webdriver
@@ -10,7 +11,7 @@ import asyncio
 import json
 import logging
 import time
-import requests
+import aiohttp
 import os
 import re
 
@@ -25,29 +26,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage for task statuses
-tasks = {}
-
-# Custom logger that streams logs
-class StreamingHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.logs = asyncio.Queue()
-
-    def emit(self, record):
-        log_entry = self.format(record)
-        asyncio.create_task(self.logs.put({
-            "timestamp": record.asctime,
-            "level": record.levelname,
-            "message": record.message
-        }))
-
 # Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("scraper")
-logger.setLevel(logging.INFO)
-streaming_handler = StreamingHandler()
-streaming_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(streaming_handler)
 
 # Define cities and tags
 web3event_cities = ["ny--new-york", "ca--san-francisco", "gb--london"]
@@ -62,10 +43,6 @@ web3event_tags = [
 class ScraperRequest(BaseModel):
     city: str
     tags: Optional[List[str]] = None
-
-class ScraperResponse(BaseModel):
-    message: str
-    task_id: str
 
 def setup_driver():
     chrome_options = Options()
@@ -106,7 +83,7 @@ def extract_event_ids(requests):
                 return match.group(1).split(',')
     return []
 
-def fetch_event_data(event_ids):
+async def fetch_event_data(event_ids):
     url = "https://www.eventbrite.com/api/v3/destination/events/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.90 Safari/537.36",
@@ -120,13 +97,10 @@ def fetch_event_data(event_ids):
         "expand": "event_sales_status,image,primary_venue,saves,ticket_availability,primary_organizer,public_collections",
         "page_size": len(event_ids)
     }
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
-
-def save_to_file(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as response:
+            response.raise_for_status()
+            return await response.json()
 
 def extract_event_detailinfo(event):
     event_detail_info = {}
@@ -187,101 +161,84 @@ def extract_event_detailinfo(event):
 
     return event_detail_info
 
-async def scrape_events(city: str, tags: List[str], task_id: str):
-    tasks[task_id] = {"status": "in progress", "completion": 0}
+async def scrape_events(city: str, tags: List[str]):
     driver = setup_driver()
     all_events = []
-
     try:
         for i, tag in enumerate(tags):
-            logger.info(f"Searching events in {city} with tag {tag}")
+            log_message = f"Searching events in {city} with tag {tag}"
+            logger.info(log_message)
+            yield f"{log_message}\n"
+            
             page = 1
             events_found = True
-
             while events_found:
                 url = f"https://www.eventbrite.com/d/{city}/{tag}/?page={page}"
-                logger.info(f"Scraping page {page} for tag {tag}")
+                log_message = f"Scraping page {page} for tag {tag}"
+                logger.info(log_message)
+                yield f"{log_message}\n"
                 
                 captured_requests = capture_network_requests(url, driver)
                 event_ids = extract_event_ids(captured_requests)
 
                 if event_ids:
-                    event_data = fetch_event_data(event_ids)
+                    event_data = await fetch_event_data(event_ids)
                     if event_data and 'events' in event_data and event_data['events']:
                         new_events = event_data['events']
                         all_events.extend(new_events)
-                        logger.info(f"Found {len(new_events)} events on page {page}")
+                        log_message = f"Found {len(new_events)} events on page {page}"
+                        logger.info(log_message)
+                        yield f"{log_message}\n"
                         page += 1
                     else:
-                        logger.info(f"No events found on page {page}. Stopping search for tag {tag}.")
+                        log_message = f"No events found on page {page}. Stopping search for tag {tag}."
+                        logger.info(log_message)
+                        yield f"{log_message}\n"
                         events_found = False
                 else:
-                    logger.info(f"No event IDs found on page {page}. Stopping search for tag {tag}.")
+                    log_message = f"No event IDs found on page {page}. Stopping search for tag {tag}."
+                    logger.info(log_message)
+                    yield f"{log_message}\n"
                     events_found = False
 
-                await asyncio.sleep(2)  # Add a delay between requests to avoid rate limiting
+                await asyncio.sleep(2)
 
-            logger.info(f"Finished searching for tag {tag}. Total pages scraped: {page - 1}")
-            
-            completion = int((i + 1) / len(tags) * 100)
-            tasks[task_id]["completion"] = completion
+            log_message = f"Finished searching for tag {tag}. Total pages scraped: {page - 1}"
+            logger.info(log_message)
+            yield f"{log_message}\n"
 
-        logger.info(f"Total events found in {city}: {len(all_events)}")
+        log_message = f"Total events found in {city}: {len(all_events)}"
+        logger.info(log_message)
+        yield f"{log_message}\n"
 
-        os.makedirs("event_data", exist_ok=True)
+        processed_events = [extract_event_detailinfo(event) for event in all_events]
+        log_message = f"Processed {len(processed_events)} events."
+        logger.info(log_message)
+        yield f"{log_message}\n"
 
-        all_events_file = f"event_data/all_events_{city.replace('--', '_')}.json"
-        save_to_file({"events": all_events}, all_events_file)
-        logger.info(f"All event data saved to {all_events_file}")
-
-        processed_events = []
-        for event in all_events:
-            processed_event = extract_event_detailinfo(event)
-            processed_events.append(processed_event)
-        
-        processed_events_file = f"event_data/processed_events_detailed_{city.replace('--', '_')}.json"
-        save_to_file(processed_events, processed_events_file)
-        logger.info(f"Processed and saved detailed information for {len(processed_events)} events to {processed_events_file}")
-
-        tasks[task_id]["status"] = "completed"
+        # Use a special delimiter to indicate the start of JSON data
+        yield "BEGIN_JSON_DATA\n"
+        yield json.dumps({"events": processed_events})
+        yield "\nEND_JSON_DATA"
 
     except Exception as e:
-        logger.error(f"An error occurred during scraping: {str(e)}")
-        tasks[task_id]["status"] = "failed"
-
+        error_message = f"An error occurred during scraping: {str(e)}"
+        logger.error(error_message)
+        yield f"{error_message}\n"
     finally:
         driver.quit()
-        logger.info("Browser closed")
+        log_message = "Browser closed"
+        logger.info(log_message)
+        yield f"{log_message}\n"
 
-@app.post("/scrape", response_model=ScraperResponse)
-async def scrape(request: ScraperRequest, background_tasks: BackgroundTasks):
+@app.post("/scrape")
+async def scrape(request: ScraperRequest):
     if request.city not in web3event_cities:
-        return {"message": "Invalid city", "task_id": ""}
+        return {"message": "Invalid city"}
     
     tags = request.tags if request.tags else web3event_tags
-    task_id = f"scrape_{request.city}_{int(time.time())}"
-    
-    background_tasks.add_task(scrape_events, request.city, tags, task_id)
-    
-    return {"message": "Scraping task started", "task_id": task_id}
 
-@app.get("/status/{task_id}")
-async def get_status(task_id: str):
-    if task_id not in tasks:
-        return {"status": "not found", "task_id": task_id}
-    return tasks[task_id]
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            log_entry = await streaming_handler.logs.get()
-            await websocket.send_json({"log": log_entry})
-    except Exception as e:
-        print(f"WebSocket error: {str(e)}")
-    finally:
-        await websocket.close()
+    return StreamingResponse(scrape_events(request.city, tags), media_type="text/plain")
 
 if __name__ == "__main__":
     import uvicorn
