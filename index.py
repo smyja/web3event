@@ -13,7 +13,7 @@ import requests
 def main():
     event_data = []
     # event_data.extend(get_from_luma())
-    event_data.extend(get_from_eventbrite())
+    event_data.extend(get_from_luma())
 
     print(event_data)
     print(len(event_data))
